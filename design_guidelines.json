@@ -1,0 +1,188 @@
+{
+  "identity": {
+    "name": "E1",
+    "role": "The Anti-AI Designer",
+    "principles": [
+      "Fusion over Imitation",
+      "Emotion First",
+      "Content is King",
+      "Zoom In",
+      "Negative Space",
+      "Contrast"
+    ],
+    "anti_patterns": [
+      "Purple/Teal generic CTA",
+      "Inter everywhere",
+      "Center-everything",
+      "Gradient overload"
+    ]
+  },
+  "typography": {
+    "font_family": {
+      "headings": "Plus Jakarta Sans, sans-serif",
+      "body": "DM Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "weights": {
+      "light": 300,
+      "regular": 400,
+      "medium": 500,
+      "bold": 700,
+      "black": 900
+    },
+    "usage": {
+      "h1": "text-4xl md:text-6xl font-bold tracking-tight leading-tight text-slate-900",
+      "h2": "text-3xl md:text-4xl font-bold tracking-tight text-slate-900",
+      "h3": "text-2xl font-semibold tracking-normal text-slate-800",
+      "body_large": "text-lg leading-relaxed text-slate-600",
+      "body_default": "text-base leading-relaxed text-slate-600",
+      "caption": "text-sm font-medium tracking-wide text-slate-500 uppercase",
+      "button": "text-sm font-bold tracking-wide uppercase"
+    },
+    "installation": "Import fonts via Google Fonts in index.css: @import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;500;700&family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap');"
+  },
+  "colors": {
+    "palette": {
+      "brand": {
+        "primary": "#4F46E5",
+        "primary_foreground": "#FFFFFF",
+        "secondary": "#FACC15",
+        "secondary_foreground": "#1E1B4B",
+        "accent": "#818CF8"
+      },
+      "neutral": {
+        "background": "#F8FAFC",
+        "surface": "#FFFFFF",
+        "border": "#E2E8F0",
+        "text_main": "#0F172A",
+        "text_muted": "#64748B"
+      },
+      "semantic": {
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "error": "#EF4444",
+        "info": "#3B82F6"
+      }
+    },
+    "theme_strategy": "Light Mode Dominant. High contrast. Dealer UI uses 'Sunny Yellow' (#FACC15) for primary actions to mimic Bumble's energy. Brand Admin uses 'Vibrant Indigo' (#4F46E5) for professional authority."
+  },
+  "layout": {
+    "spacing_scale": [
+      "p-1", "p-2", "p-4", "p-6", "p-8", "p-12", "p-16", "p-24", "p-32"
+    ],
+    "container": {
+      "default": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8",
+      "narrow": "max-w-3xl mx-auto px-4"
+    },
+    "grids": {
+      "dashboard": "grid grid-cols-1 md:grid-cols-12 gap-6",
+      "gallery": "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8",
+      "bento": "grid grid-cols-1 md:grid-cols-4 gap-4 auto-rows-[minmax(180px,auto)]"
+    },
+    "radius": {
+      "default": "rounded-xl",
+      "button": "rounded-full",
+      "card": "rounded-2xl"
+    }
+  },
+  "components": {
+    "buttons": {
+      "base": "inline-flex items-center justify-center whitespace-nowrap text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+      "variants": {
+        "default": "bg-primary text-primary-foreground hover:bg-primary/90 shadow-lg shadow-primary/20",
+        "dealer_action": "bg-[#FACC15] text-slate-900 hover:bg-[#EAB308] font-bold shadow-xl shadow-yellow-400/20 h-12 px-8 text-base",
+        "outline": "border-2 border-slate-200 bg-transparent hover:bg-slate-50 text-slate-900",
+        "ghost": "hover:bg-slate-100 hover:text-slate-900"
+      }
+    },
+    "cards": {
+      "base": "bg-white text-card-foreground shadow-sm border border-slate-100",
+      "hover_effect": "hover:shadow-xl hover:-translate-y-1 transition-all duration-300 ease-out",
+      "dealer_card": "bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border-none overflow-hidden"
+    },
+    "inputs": {
+      "base": "flex h-11 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+    }
+  },
+  "views": {
+    "dealer_portal": {
+      "vibe": "Bumble-like simplicity. Swipeable, big touch targets, minimal text.",
+      "navigation": "Bottom Fixed Bar (Home, Library, Profile)",
+      "creative_card": "Full width or large card. Image takes 80% of space. 'Personalize' button is massive.",
+      "slip_selector": "Horizontal scroll of circular or square templates at bottom of screen."
+    },
+    "brand_admin": {
+      "vibe": "Canva-like workspace. Clean, organized, drag-and-drop feel.",
+      "navigation": "Sidebar (Collapsible)",
+      "dashboard": "Bento grid of analytics (Top Performing Dealers, Recent Downloads).",
+      "upload_zone": "Large dashed area with 'Drop files here' illustration."
+    }
+  },
+  "assets": {
+    "icons": {
+      "primary": "lucide-react",
+      "marketing": "@phosphor-icons/react"
+    },
+    "images": {
+      "posters": [
+        {
+          "url": "https://images.unsplash.com/photo-1703680325701-c2e7e03824a3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBhZHZlcnRpc2luZyUyMHBvc3RlciUyMGZhc2hpb24lMjBzYWxlfGVufDB8fHx8MTc2ODI0ODkxOXww&ixlib=rb-4.1.0&q=85",
+          "category": "creative_sample",
+          "description": "Fashion sale poster sample"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1758061115348-831ae14a801e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBhZHZlcnRpc2luZyUyMHBvc3RlciUyMGZhc2hpb24lMjBzYWxlfGVufDB8fHx8MTc2ODI0ODkxOXww&ixlib=rb-4.1.0&q=85",
+          "category": "creative_sample",
+          "description": "Urban advertisement sample"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1745564371387-7707cc41e958?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwzfHxtb2Rlcm4lMjBhZHZlcnRpc2luZyUyMHBvc3RlciUyMGZhc2hpb24lMjBzYWxlfGVufDB8fHx8MTc2ODI0ODkxOXww&ixlib=rb-4.1.0&q=85",
+          "category": "creative_sample",
+          "description": "Movie poster sample"
+        }
+      ],
+      "logos": [
+        {
+          "url": "https://images.unsplash.com/photo-1762939079730-23708c0dd337?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzl8MHwxfHNlYXJjaHwxfHxjb21wYW55JTIwbG9nbyUyMG1vZGVybiUyMG1pbmltYWwlMjB2ZWN0b3J8ZW58MHx8fHwxNzY4MjQ4OTIyfDA&ixlib=rb-4.1.0&q=85",
+          "category": "brand_logo",
+          "description": "Minimalist medical logo"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1628760584600-6c31148991e9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzl8MHwxfHNlYXJjaHwyfHxjb21wYW55JTIwbG9nbyUyMG1vZGVybiUyMG1pbmltYWwlMjB2ZWN0b3J8ZW58MHx8fHwxNzY4MjQ4OTIyfDA&ixlib=rb-4.1.0&q=85",
+          "category": "brand_logo",
+          "description": "Abstract blue oval logo"
+        }
+      ],
+      "people": [
+        {
+          "url": "https://images.unsplash.com/photo-1664101606938-e664f5852fac?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzZ8MHwxfHNlYXJjaHwxfHxpbmRpYW4lMjBzaG9wJTIwb3duZXIlMjBwb3J0cmFpdCUyMHNtaWxpbmd8ZW58MHx8fHwxNzY4MjQ4OTI0fDA&ixlib=rb-4.1.0&q=85",
+          "category": "dealer_profile",
+          "description": "Smiling shop owner 1"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1695398170358-99749f64c887?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzZ8MHwxfHNlYXJjaHwyfHxpbmRpYW4lMjBzaG9wJTIwb3duZXIlMjBwb3J0cmFpdCUyMHNtaWxpbmd8ZW58MHx8fHwxNzY4MjQ4OTI0fDA&ixlib=rb-4.1.0&q=85",
+          "category": "dealer_profile",
+          "description": "Shop owner in front of store"
+        }
+      ]
+    }
+  },
+  "motion": {
+    "transitions": "transition-all duration-300 ease-out",
+    "hover": "hover:scale-[1.02] active:scale-[0.98]",
+    "page_load": "animate-in fade-in slide-in-from-bottom-4 duration-500"
+  },
+  "universal_guidelines": [
+    "Do not use generic centered layouts.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur) for overlays.",
+    "Every interaction needs micro-animations.",
+    "Use 2-3x more spacing than feels comfortable.",
+    "Subtle grain textures and noise overlays are encouraged.",
+    "All interactive elements MUST include data-testid attribute.",
+    "Use sonner for toasts.",
+    "Components MUST use named exports.",
+    "Pages MUST use default exports."
+  ],
+  "instructions_to_main_agent": "You are building a B2B app with a B2C soul. The Dealer Portal must feel like a consumer app (Bumble/Instagram) - extremely simple, visual, and touch-friendly. The Brand Admin is a professional workspace (Canva/Linear) - clean, efficient, and powerful. Use the provided image URLs for all mock data. Implement the 'Slip' feature as a visual overlay on the creative image."
+}
