@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ArrowLeft, Shield, RefreshCw } from 'lucide-react';
 import { Button } from '../../components/ui/button';
-import { InputOTP, InputOTPGroup, InputOTPSlot } from '../../components/ui/input-otp';
+import { Input } from '../../components/ui/input';
 import { authAPI } from '../../lib/api';
 import { useAuthStore } from '../../lib/store';
 
@@ -31,16 +31,9 @@ export default function OTPVerifyPage() {
     }
   }, [countdown]);
   
-  useEffect(() => {
-    // Auto-submit when OTP is complete
-    if (otp.length === 6) {
-      handleVerify();
-    }
-  }, [otp]);
-  
-  const handleVerify = async () => {
+  const handleVerify = useCallback(async () => {
     if (otp.length !== 6) {
-      toast.error('Please enter the complete OTP');
+      toast.error('Please enter the complete 6-digit OTP');
       return;
     }
     
@@ -68,6 +61,11 @@ export default function OTPVerifyPage() {
     } finally {
       setLoading(false);
     }
+  }, [otp, phone, setAuth, navigate]);
+  
+  const handleOtpChange = (e) => {
+    const value = e.target.value.replace(/\D/g, '').slice(0, 6);
+    setOtp(value);
   };
   
   const handleResend = async () => {
@@ -119,22 +117,18 @@ export default function OTPVerifyPage() {
           </p>
           
           <div className="flex justify-center mb-8">
-            <InputOTP
+            <Input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
               maxLength={6}
               value={otp}
-              onChange={setOtp}
+              onChange={handleOtpChange}
+              placeholder="000000"
+              className="input-field text-center text-2xl font-bold tracking-[0.5em] w-48"
+              autoFocus
               data-testid="otp-input"
-            >
-              <InputOTPGroup className="gap-2">
-                {[0, 1, 2, 3, 4, 5].map((index) => (
-                  <InputOTPSlot 
-                    key={index} 
-                    index={index} 
-                    className="w-12 h-14 text-xl font-bold border-2 border-slate-200 rounded-xl focus:border-[#4F46E5] focus:ring-2 focus:ring-[#4F46E5]/20"
-                  />
-                ))}
-              </InputOTPGroup>
-            </InputOTP>
+            />
           </div>
           
           <Button 
