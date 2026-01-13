@@ -182,6 +182,55 @@ export const analyticsAPI = {
   dealer: (dealerId) => api.get(`/analytics/dealer/${dealerId}`),
 };
 
+// V2: Category APIs
+export const categoryAPI = {
+  list: () => api.get('/categories'),
+  listCreativeTags: () => api.get('/creative-tags'),
+};
+
+// V2: Creative Feed API (for dealer home)
+export const feedAPI = {
+  get: () => api.get('/creatives/feed'),
+};
+
+// V2: Slip Design APIs (Fabric.js)
+export const slipDesignAPI = {
+  list: (params) => api.get('/slip-designs', { params }),
+  get: (id) => api.get(`/slip-designs/${id}`),
+  create: (data) => api.post('/slip-designs', data),
+  update: (id, designJson) => api.put(`/slip-designs/${id}`, designJson),
+  delete: (id) => api.delete(`/slip-designs/${id}`),
+  approve: (id, approve = true) => api.put(`/slip-designs/${id}/approve`, null, { params: { approve } }),
+};
+
+// V2: Dealer Request APIs
+export const dealerRequestAPI = {
+  list: (params) => api.get('/dealer-requests', { params }),
+  create: (data) => api.post('/dealer-requests', data),
+  approve: (id, approve = true, zoneId = null) => 
+    api.put(`/dealer-requests/${id}/approve`, null, { params: { approve, zone_id: zoneId } }),
+};
+
+// V2: Campaign APIs (WhatsApp)
+export const campaignAPI = {
+  list: (params) => api.get('/campaigns', { params }),
+  get: (id) => api.get(`/campaigns/${id}`),
+  create: (data) => api.post('/campaigns', data),
+  send: (id) => api.post(`/campaigns/${id}/send`),
+};
+
+// V2: Featured Payment APIs
+export const featuredAPI = {
+  packages: () => api.get('/featured/packages'),
+  createPayment: (data) => api.post('/featured/create-payment', data),
+};
+
+// V2: Default Slip per Brand
+export const dealerDefaultSlipAPI = {
+  set: (dealerId, brandId, slipId, slipType = 'uploaded') => 
+    api.put(`/dealers/${dealerId}/default-slip`, null, { params: { brand_id: brandId, slip_id: slipId, slip_type: slipType } }),
+};
+
 // Seed data
 export const seedData = () => api.post('/seed');
 
