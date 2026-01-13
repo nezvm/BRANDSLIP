@@ -1,12 +1,12 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form, Query, Request
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict, EmailStr
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -23,6 +23,8 @@ from botocore.exceptions import ClientError
 import aiofiles
 import json
 import secrets
+import httpx
+import asyncio
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -35,8 +37,8 @@ db = client[os.environ['DB_NAME']]
 # JWT Configuration
 JWT_SECRET = os.environ.get('JWT_SECRET', secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE = 60 * 24  # 24 hours in minutes
-REFRESH_TOKEN_EXPIRE = 60 * 24 * 30  # 30 days in minutes
+ACCESS_TOKEN_EXPIRE = 60 * 24
+REFRESH_TOKEN_EXPIRE = 60 * 24 * 30
 
 # S3 Configuration
 S3_BUCKET = os.environ.get('S3_BUCKET', 'brandslip-assets')
@@ -45,24 +47,60 @@ S3_ACCESS_KEY = os.environ.get('S3_ACCESS_KEY', None)
 S3_SECRET_KEY = os.environ.get('S3_SECRET_KEY', None)
 USE_S3 = S3_ACCESS_KEY is not None
 
-# Local storage fallback
+# Stripe Configuration
+STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY', 'sk_test_emergent')
+
+# WhatsApp Cloud API Configuration
+WHATSAPP_PHONE_ID = os.environ.get('WHATSAPP_PHONE_ID', '')
+WHATSAPP_ACCESS_TOKEN = os.environ.get('WHATSAPP_ACCESS_TOKEN', '')
+
+# Local storage
 UPLOAD_DIR = ROOT_DIR / 'uploads'
 UPLOAD_DIR.mkdir(exist_ok=True)
-(UPLOAD_DIR / 'creatives').mkdir(exist_ok=True)
-(UPLOAD_DIR / 'slips').mkdir(exist_ok=True)
-(UPLOAD_DIR / 'logos').mkdir(exist_ok=True)
-(UPLOAD_DIR / 'rendered').mkdir(exist_ok=True)
+for folder in ['creatives', 'slips', 'logos', 'rendered', 'slip_designs']:
+    (UPLOAD_DIR / folder).mkdir(exist_ok=True)
 
-# SendGrid Configuration
-SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
-SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'noreply@brandslip.com')
-
-app = FastAPI(title="BrandSlip API")
+app = FastAPI(title="BrandSlip API V2")
 api_router = APIRouter(prefix="/api")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ==================== CONSTANTS ====================
+
+CATEGORIES = [
+    {"id": "fmcg", "name": "FMCG", "icon": "🛒"},
+    {"id": "electronics", "name": "Electronics", "icon": "📱"},
+    {"id": "appliances", "name": "Appliances", "icon": "🔌"},
+    {"id": "steel", "name": "Steel & Metals", "icon": "🔩"},
+    {"id": "paint", "name": "Paint & Coatings", "icon": "🎨"},
+    {"id": "pharma", "name": "Pharma & Healthcare", "icon": "💊"},
+    {"id": "automotive", "name": "Automotive", "icon": "🚗"},
+    {"id": "fashion", "name": "Fashion & Apparel", "icon": "👕"},
+    {"id": "jewelry", "name": "Jewelry", "icon": "💎"},
+    {"id": "home_decor", "name": "Home Decor", "icon": "🏠"},
+    {"id": "food_beverage", "name": "Food & Beverage", "icon": "🍽️"},
+    {"id": "agriculture", "name": "Agriculture", "icon": "🌾"},
+    {"id": "construction", "name": "Construction", "icon": "🏗️"},
+    {"id": "chemicals", "name": "Chemicals", "icon": "🧪"},
+]
+
+CREATIVE_TAGS = [
+    {"id": "featured", "name": "Featured", "icon": "⭐"},
+    {"id": "seasonal", "name": "Seasonal", "icon": "🎉"},
+    {"id": "product_ads", "name": "Product Ads", "icon": "🛍️"},
+    {"id": "brand_awareness", "name": "Brand Awareness", "icon": "📣"},
+    {"id": "trending", "name": "Trending", "icon": "🔥"},
+    {"id": "new", "name": "New", "icon": "🆕"},
+    {"id": "offers", "name": "Offers", "icon": "🏷️"},
+    {"id": "local", "name": "Local", "icon": "📍"},
+]
+
+FEATURED_PACKAGES = {
+    "basic": {"name": "Basic Featured", "price": 99.00, "duration_days": 7, "position": "feed"},
+    "premium": {"name": "Premium Featured", "price": 299.00, "duration_days": 14, "position": "carousel"},
+    "spotlight": {"name": "Spotlight", "price": 499.00, "duration_days": 30, "position": "top"},
+}
 
 # ==================== MODELS ====================
 
@@ -93,6 +131,7 @@ class UserResponse(BaseModel):
     zone_ids: List[str] = []
     status: str = "active"
     created_at: str
+    categories: List[str] = []
 
 class OTPRequest(BaseModel):
     phone: str
@@ -110,6 +149,7 @@ class TokenResponse(BaseModel):
 class BrandCreate(BaseModel):
     name: str
     logo: Optional[str] = None
+    default_category: Optional[str] = None
 
 class BrandSettings(BaseModel):
     dealer_auto_approve: bool = False
@@ -122,6 +162,7 @@ class BrandResponse(BaseModel):
     name: str
     logo: Optional[str] = None
     settings: dict
+    default_category: Optional[str] = None
     created_at: str
 
 class ZoneCreate(BaseModel):
@@ -151,11 +192,7 @@ class DealerCreate(BaseModel):
     district: str
     state: str
     email: Optional[str] = None
-
-class DealerBrandLink(BaseModel):
-    brand_id: str
-    status: str = "pending"
-    zone_id: Optional[str] = None
+    categories: List[str] = []
 
 class DealerResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -170,6 +207,8 @@ class DealerResponse(BaseModel):
     state: str
     logo_url: Optional[str] = None
     brand_links: List[dict] = []
+    categories: List[str] = []
+    default_slips: Dict[str, str] = {}
     created_at: str
 
 class CreativeCreate(BaseModel):
@@ -177,11 +216,14 @@ class CreativeCreate(BaseModel):
     name: str
     description: Optional[str] = None
     tags: List[str] = []
+    highlight_tags: List[str] = []
     language: str = "en"
     category: str = "general"
     validity_start: Optional[str] = None
     validity_end: Optional[str] = None
     targeting: dict = {"all": True, "zone_ids": [], "dealer_ids": []}
+    is_featured: bool = False
+    featured_priority: int = 0
 
 class CreativeResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -190,44 +232,28 @@ class CreativeResponse(BaseModel):
     name: str
     description: Optional[str] = None
     tags: List[str] = []
+    highlight_tags: List[str] = []
     language: str
     category: str
     validity_start: Optional[str] = None
     validity_end: Optional[str] = None
     targeting: dict
     status: str = "active"
+    is_featured: bool = False
+    featured_priority: int = 0
+    featured_until: Optional[str] = None
     created_at: str
     variants: List[dict] = []
-
-class CreativeVariantCreate(BaseModel):
-    creative_id: str
-    brand_id: str
-    label: str
-    width: int
-    height: int
-    file_type: str = "image/png"
-
-class CreativeVariantResponse(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    creative_id: str
-    brand_id: str
-    file_url: str
-    file_type: str
-    width: int
-    height: int
-    label: str
-    created_at: str
 
 class SlipTemplateCreate(BaseModel):
     brand_id: str
     name: str
-    position: str = "bottom"  # top, bottom, left, right, corner
+    position: str = "bottom"
     max_w_pct: int = 100
     max_h_pct: int = 20
     allowed_fields: List[str] = ["shop_name", "phone", "logo", "qr"]
-    style_preset: str = "standard"  # minimal, standard, detailed
-    bg_style: str = "light"  # light, dark, transparent
+    style_preset: str = "standard"
+    bg_style: str = "light"
 
 class SlipTemplateResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -243,10 +269,24 @@ class SlipTemplateResponse(BaseModel):
     is_active: bool = True
     created_at: str
 
-class DealerSlipCreate(BaseModel):
+class SlipDesignCreate(BaseModel):
     dealer_id: str
     brand_id: str
     name: str
+    design_json: dict
+    thumbnail_url: Optional[str] = None
+
+class SlipDesignResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    dealer_id: str
+    brand_id: str
+    name: str
+    design_json: dict
+    thumbnail_url: Optional[str] = None
+    status: str = "approved"
+    is_default: bool = False
+    created_at: str
 
 class DealerSlipResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -261,11 +301,12 @@ class DealerSlipResponse(BaseModel):
 
 class RenderRequest(BaseModel):
     creative_variant_id: str
-    slip_mode: str = "template"  # template or dealer_slip
+    slip_mode: str = "template"
     slip_template_id: Optional[str] = None
     dealer_slip_id: Optional[str] = None
+    slip_design_id: Optional[str] = None
     dealer_id: str
-    qr_type: Optional[str] = None  # whatsapp, maps, custom
+    qr_type: Optional[str] = None
     qr_value: Optional[str] = None
 
 class RenderResponse(BaseModel):
@@ -279,12 +320,42 @@ class RenderResponse(BaseModel):
     hash_key: str
     created_at: str
 
-class EventCreate(BaseModel):
+class DealerRequestCreate(BaseModel):
+    dealer_id: str
     brand_id: str
-    dealer_id: Optional[str] = None
-    user_id: Optional[str] = None
-    type: str
-    meta: dict = {}
+    message: Optional[str] = None
+
+class CampaignCreate(BaseModel):
+    brand_id: str
+    name: str
+    creative_id: str
+    variant_ids: List[str] = []
+    message_template: str
+    target_type: str = "dealers"
+    target_zone_ids: List[str] = []
+    target_dealer_ids: List[str] = []
+    scheduled_at: Optional[str] = None
+
+class CampaignResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    brand_id: str
+    name: str
+    creative_id: str
+    variant_ids: List[str]
+    message_template: str
+    target_type: str
+    status: str = "draft"
+    total_recipients: int = 0
+    sent_count: int = 0
+    delivered_count: int = 0
+    clicked_count: int = 0
+    created_at: str
+
+class FeaturedPaymentRequest(BaseModel):
+    creative_id: str
+    package_id: str
+    origin_url: str
 
 # ==================== UTILITIES ====================
 
@@ -296,12 +367,6 @@ def now_iso() -> str:
 
 def generate_otp() -> str:
     return ''.join(random.choices(string.digits, k=6))
-
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
 
 def create_token(data: dict, expires_delta: int) -> str:
     to_encode = data.copy()
@@ -331,19 +396,13 @@ def get_auth_header():
         return await get_current_user(authorization)
     return auth_dependency
 
-# File storage utilities
 async def save_file(file: UploadFile, folder: str) -> str:
     file_id = generate_id()
     ext = Path(file.filename).suffix or '.png'
     filename = f"{file_id}{ext}"
     
     if USE_S3:
-        s3_client = boto3.client(
-            's3',
-            endpoint_url=S3_ENDPOINT,
-            aws_access_key_id=S3_ACCESS_KEY,
-            aws_secret_access_key=S3_SECRET_KEY
-        )
+        s3_client = boto3.client('s3', endpoint_url=S3_ENDPOINT, aws_access_key_id=S3_ACCESS_KEY, aws_secret_access_key=S3_SECRET_KEY)
         key = f"{folder}/{filename}"
         content = await file.read()
         s3_client.put_object(Bucket=S3_BUCKET, Key=key, Body=content, ContentType=file.content_type)
@@ -362,12 +421,7 @@ async def save_bytes(content: bytes, folder: str, ext: str = ".png") -> str:
     filename = f"{file_id}{ext}"
     
     if USE_S3:
-        s3_client = boto3.client(
-            's3',
-            endpoint_url=S3_ENDPOINT,
-            aws_access_key_id=S3_ACCESS_KEY,
-            aws_secret_access_key=S3_SECRET_KEY
-        )
+        s3_client = boto3.client('s3', endpoint_url=S3_ENDPOINT, aws_access_key_id=S3_ACCESS_KEY, aws_secret_access_key=S3_SECRET_KEY)
         key = f"{folder}/{filename}"
         s3_client.put_object(Bucket=S3_BUCKET, Key=key, Body=content, ContentType="image/png")
         if S3_ENDPOINT:
@@ -383,7 +437,6 @@ async def save_bytes(content: bytes, folder: str, ext: str = ".png") -> str:
 
 @api_router.post("/auth/send-otp")
 async def send_otp(request: OTPRequest, background_tasks: BackgroundTasks):
-    """Send OTP to phone number (via email for MVP)"""
     otp = generate_otp()
     expires = datetime.now(timezone.utc) + timedelta(minutes=10)
     
@@ -393,31 +446,11 @@ async def send_otp(request: OTPRequest, background_tasks: BackgroundTasks):
         upsert=True
     )
     
-    # For MVP, log OTP (in production, send via SMS/Email)
     logger.info(f"OTP for {request.phone}: {otp}")
-    
-    # Try to send email if user has email
-    user = await db.users.find_one({"phone": request.phone}, {"_id": 0})
-    if user and user.get("email") and SENDGRID_API_KEY:
-        try:
-            from sendgrid import SendGridAPIClient
-            from sendgrid.helpers.mail import Mail
-            message = Mail(
-                from_email=SENDER_EMAIL,
-                to_emails=user["email"],
-                subject="Your BrandSlip OTP",
-                html_content=f"<h2>Your OTP is: {otp}</h2><p>Valid for 10 minutes.</p>"
-            )
-            sg = SendGridAPIClient(SENDGRID_API_KEY)
-            sg.send(message)
-        except Exception as e:
-            logger.error(f"SendGrid error: {e}")
-    
     return {"message": "OTP sent successfully", "otp_for_dev": otp}
 
 @api_router.post("/auth/verify-otp", response_model=TokenResponse)
 async def verify_otp(request: OTPVerify):
-    """Verify OTP and return JWT tokens"""
     otp_doc = await db.otps.find_one({"phone": request.phone}, {"_id": 0})
     
     if not otp_doc:
@@ -434,10 +467,8 @@ async def verify_otp(request: OTPVerify):
         await db.otps.update_one({"phone": request.phone}, {"$inc": {"attempts": 1}})
         raise HTTPException(status_code=400, detail="Invalid OTP")
     
-    # Delete OTP after successful verification
     await db.otps.delete_one({"phone": request.phone})
     
-    # Find or create user
     user = await db.users.find_one({"phone": request.phone}, {"_id": 0})
     if not user:
         user = {
@@ -450,6 +481,7 @@ async def verify_otp(request: OTPVerify):
             "dealer_id": None,
             "zone_ids": [],
             "status": "pending_profile",
+            "categories": [],
             "created_at": now_iso()
         }
         await db.users.insert_one(user)
@@ -459,15 +491,10 @@ async def verify_otp(request: OTPVerify):
     
     user_response = {k: v for k, v in user.items() if k != "_id"}
     
-    return TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        user=user_response
-    )
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token, user=user_response)
 
 @api_router.post("/auth/refresh")
 async def refresh_token(refresh_token: str):
-    """Refresh access token"""
     try:
         payload = jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
@@ -484,8 +511,17 @@ async def refresh_token(refresh_token: str):
 
 @api_router.get("/auth/me", response_model=UserResponse)
 async def get_me(user: dict = Depends(get_auth_header())):
-    """Get current user profile"""
     return UserResponse(**user)
+
+# ==================== CATEGORIES ENDPOINTS ====================
+
+@api_router.get("/categories")
+async def list_categories():
+    return CATEGORIES
+
+@api_router.get("/creative-tags")
+async def list_creative_tags():
+    return CREATIVE_TAGS
 
 # ==================== USER ENDPOINTS ====================
 
@@ -493,14 +529,16 @@ async def get_me(user: dict = Depends(get_auth_header())):
 async def update_profile(
     name: str = Form(None),
     email: str = Form(None),
+    categories: str = Form(None),
     user: dict = Depends(get_auth_header())
 ):
-    """Update user profile"""
     updates = {}
     if name:
         updates["name"] = name
     if email:
         updates["email"] = email
+    if categories:
+        updates["categories"] = [c.strip() for c in categories.split(",") if c.strip()]
     if updates:
         updates["status"] = "active"
         await db.users.update_one({"id": user["id"]}, {"$set": updates})
@@ -510,7 +548,6 @@ async def update_profile(
 
 @api_router.get("/users", response_model=List[UserResponse])
 async def list_users(brand_id: str = None, role: str = None, user: dict = Depends(get_auth_header())):
-    """List users (admin only)"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -525,7 +562,6 @@ async def list_users(brand_id: str = None, role: str = None, user: dict = Depend
 
 @api_router.post("/users", response_model=UserResponse)
 async def create_user(user_data: UserCreate, current_user: dict = Depends(get_auth_header())):
-    """Create a new user (admin only)"""
     if current_user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -538,6 +574,7 @@ async def create_user(user_data: UserCreate, current_user: dict = Depends(get_au
         **user_data.model_dump(),
         "dealer_id": None,
         "status": "active",
+        "categories": [],
         "created_at": now_iso()
     }
     await db.users.insert_one(user)
@@ -547,7 +584,6 @@ async def create_user(user_data: UserCreate, current_user: dict = Depends(get_au
 
 @api_router.post("/brands", response_model=BrandResponse)
 async def create_brand(brand: BrandCreate, user: dict = Depends(get_auth_header())):
-    """Create a new brand"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -555,27 +591,32 @@ async def create_brand(brand: BrandCreate, user: dict = Depends(get_auth_header(
         "id": generate_id(),
         **brand.model_dump(),
         "settings": {"dealer_auto_approve": False, "slip_approval_required": True, "max_upload_size_mb": 10},
+        "whatsapp_config": {},
+        "theme": {},
         "created_at": now_iso()
     }
     await db.brands.insert_one(brand_doc)
-    
-    # Add brand to user's brand_ids
     await db.users.update_one({"id": user["id"]}, {"$addToSet": {"brand_ids": brand_doc["id"]}})
     
     return BrandResponse(**brand_doc)
 
 @api_router.get("/brands", response_model=List[BrandResponse])
 async def list_brands(user: dict = Depends(get_auth_header())):
-    """List brands accessible to user"""
     if user["role"] == UserRole.PLATFORM_ADMIN:
         brands = await db.brands.find({}, {"_id": 0}).to_list(100)
+    elif user["role"] in [UserRole.DEALER_OWNER, UserRole.DEALER_STAFF]:
+        dealer = await db.dealers.find_one({"id": user.get("dealer_id")}, {"_id": 0})
+        if dealer:
+            brand_ids = [bl["brand_id"] for bl in dealer.get("brand_links", []) if bl["status"] == "approved"]
+            brands = await db.brands.find({"id": {"$in": brand_ids}}, {"_id": 0}).to_list(100)
+        else:
+            brands = await db.brands.find({}, {"_id": 0}).to_list(100)
     else:
         brands = await db.brands.find({"id": {"$in": user.get("brand_ids", [])}}, {"_id": 0}).to_list(100)
     return [BrandResponse(**b) for b in brands]
 
 @api_router.get("/brands/{brand_id}", response_model=BrandResponse)
 async def get_brand(brand_id: str, user: dict = Depends(get_auth_header())):
-    """Get brand details"""
     brand = await db.brands.find_one({"id": brand_id}, {"_id": 0})
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
@@ -583,7 +624,6 @@ async def get_brand(brand_id: str, user: dict = Depends(get_auth_header())):
 
 @api_router.put("/brands/{brand_id}/settings")
 async def update_brand_settings(brand_id: str, settings: BrandSettings, user: dict = Depends(get_auth_header())):
-    """Update brand settings"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -591,25 +631,27 @@ async def update_brand_settings(brand_id: str, settings: BrandSettings, user: di
     brand = await db.brands.find_one({"id": brand_id}, {"_id": 0})
     return brand
 
+@api_router.put("/brands/{brand_id}/whatsapp-config")
+async def update_whatsapp_config(brand_id: str, config: dict, user: dict = Depends(get_auth_header())):
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    await db.brands.update_one({"id": brand_id}, {"$set": {"whatsapp_config": config}})
+    return {"message": "WhatsApp config updated"}
+
 # ==================== ZONE ENDPOINTS ====================
 
 @api_router.post("/zones", response_model=ZoneResponse)
 async def create_zone(zone: ZoneCreate, user: dict = Depends(get_auth_header())):
-    """Create a new zone"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    zone_doc = {
-        "id": generate_id(),
-        **zone.model_dump(),
-        "created_at": now_iso()
-    }
+    zone_doc = {"id": generate_id(), **zone.model_dump(), "created_at": now_iso()}
     await db.zones.insert_one(zone_doc)
     return ZoneResponse(**zone_doc)
 
 @api_router.get("/zones", response_model=List[ZoneResponse])
 async def list_zones(brand_id: str = None, user: dict = Depends(get_auth_header())):
-    """List zones"""
     query = {}
     if brand_id:
         query["brand_id"] = brand_id
@@ -621,7 +663,6 @@ async def list_zones(brand_id: str = None, user: dict = Depends(get_auth_header(
 
 @api_router.get("/zones/{zone_id}", response_model=ZoneResponse)
 async def get_zone(zone_id: str, user: dict = Depends(get_auth_header())):
-    """Get zone details"""
     zone = await db.zones.find_one({"id": zone_id}, {"_id": 0})
     if not zone:
         raise HTTPException(status_code=404, detail="Zone not found")
@@ -629,7 +670,6 @@ async def get_zone(zone_id: str, user: dict = Depends(get_auth_header())):
 
 @api_router.put("/zones/{zone_id}")
 async def update_zone(zone_id: str, zone: ZoneCreate, user: dict = Depends(get_auth_header())):
-    """Update zone"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -639,7 +679,6 @@ async def update_zone(zone_id: str, zone: ZoneCreate, user: dict = Depends(get_a
 
 @api_router.delete("/zones/{zone_id}")
 async def delete_zone(zone_id: str, user: dict = Depends(get_auth_header())):
-    """Delete zone"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -650,7 +689,6 @@ async def delete_zone(zone_id: str, user: dict = Depends(get_auth_header())):
 
 @api_router.post("/dealers", response_model=DealerResponse)
 async def create_dealer(dealer: DealerCreate, brand_id: str = None, user: dict = Depends(get_auth_header())):
-    """Create/register dealer"""
     existing = await db.dealers.find_one({"phone": dealer.phone}, {"_id": 0})
     if existing:
         raise HTTPException(status_code=400, detail="Dealer with this phone already exists")
@@ -667,23 +705,16 @@ async def create_dealer(dealer: DealerCreate, brand_id: str = None, user: dict =
         **dealer.model_dump(),
         "logo_url": None,
         "brand_links": brand_links,
+        "default_slips": {},
         "created_at": now_iso()
     }
     await db.dealers.insert_one(dealer_doc)
-    
-    # Link user to dealer
     await db.users.update_one({"id": user["id"]}, {"$set": {"dealer_id": dealer_doc["id"]}})
     
     return DealerResponse(**dealer_doc)
 
 @api_router.get("/dealers", response_model=List[DealerResponse])
-async def list_dealers(
-    brand_id: str = None,
-    zone_id: str = None,
-    status: str = None,
-    user: dict = Depends(get_auth_header())
-):
-    """List dealers"""
+async def list_dealers(brand_id: str = None, zone_id: str = None, status: str = None, user: dict = Depends(get_auth_header())):
     query = {}
     
     if brand_id:
@@ -693,7 +724,6 @@ async def list_dealers(
     if status:
         query["brand_links.status"] = status
     
-    # Zonal managers can only see dealers in their zones
     if user["role"] == UserRole.ZONAL_MANAGER:
         query["brand_links.zone_id"] = {"$in": user.get("zone_ids", [])}
     
@@ -702,7 +732,6 @@ async def list_dealers(
 
 @api_router.get("/dealers/{dealer_id}", response_model=DealerResponse)
 async def get_dealer(dealer_id: str, user: dict = Depends(get_auth_header())):
-    """Get dealer details"""
     dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0})
     if not dealer:
         raise HTTPException(status_code=404, detail="Dealer not found")
@@ -710,27 +739,18 @@ async def get_dealer(dealer_id: str, user: dict = Depends(get_auth_header())):
 
 @api_router.put("/dealers/{dealer_id}")
 async def update_dealer(dealer_id: str, dealer: DealerCreate, user: dict = Depends(get_auth_header())):
-    """Update dealer profile"""
     await db.dealers.update_one({"id": dealer_id}, {"$set": dealer.model_dump()})
     updated = await db.dealers.find_one({"id": dealer_id}, {"_id": 0})
     return updated
 
 @api_router.post("/dealers/{dealer_id}/logo")
 async def upload_dealer_logo(dealer_id: str, file: UploadFile = File(...), user: dict = Depends(get_auth_header())):
-    """Upload dealer logo"""
     file_url = await save_file(file, "logos")
     await db.dealers.update_one({"id": dealer_id}, {"$set": {"logo_url": file_url}})
     return {"logo_url": file_url}
 
 @api_router.put("/dealers/{dealer_id}/approve")
-async def approve_dealer(
-    dealer_id: str,
-    brand_id: str,
-    zone_id: str = None,
-    approve: bool = True,
-    user: dict = Depends(get_auth_header())
-):
-    """Approve or reject dealer for a brand"""
+async def approve_dealer(dealer_id: str, brand_id: str, zone_id: str = None, approve: bool = True, user: dict = Depends(get_auth_header())):
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN, UserRole.ZONAL_MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -741,15 +761,9 @@ async def approve_dealer(
         {"$set": {"brand_links.$.status": status, "brand_links.$.zone_id": zone_id}}
     )
     
-    # Log event
     await db.events.insert_one({
-        "id": generate_id(),
-        "brand_id": brand_id,
-        "dealer_id": dealer_id,
-        "user_id": user["id"],
-        "type": "dealer_approval",
-        "meta": {"status": status, "zone_id": zone_id},
-        "created_at": now_iso()
+        "id": generate_id(), "brand_id": brand_id, "dealer_id": dealer_id, "user_id": user["id"],
+        "type": "dealer_approval", "meta": {"status": status, "zone_id": zone_id}, "created_at": now_iso()
     })
     
     dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0})
@@ -757,7 +771,6 @@ async def approve_dealer(
 
 @api_router.post("/dealers/{dealer_id}/join-brand")
 async def dealer_join_brand(dealer_id: str, brand_id: str, user: dict = Depends(get_auth_header())):
-    """Dealer requests to join a brand"""
     brand = await db.brands.find_one({"id": brand_id}, {"_id": 0})
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
@@ -773,11 +786,87 @@ async def dealer_join_brand(dealer_id: str, brand_id: str, user: dict = Depends(
     dealer = await db.dealers.find_one({"id": dealer_id}, {"_id": 0})
     return dealer
 
+@api_router.put("/dealers/{dealer_id}/default-slip")
+async def set_default_slip(dealer_id: str, brand_id: str, slip_id: str, slip_type: str = "uploaded", user: dict = Depends(get_auth_header())):
+    """Set default slip per brand for a dealer"""
+    key = f"{brand_id}:{slip_type}"
+    await db.dealers.update_one({"id": dealer_id}, {"$set": {f"default_slips.{brand_id}": f"{slip_type}:{slip_id}"}})
+    return {"message": "Default slip set"}
+
+# ==================== DEALER REQUESTS ENDPOINTS ====================
+
+@api_router.post("/dealer-requests")
+async def create_dealer_request(request_data: DealerRequestCreate, user: dict = Depends(get_auth_header())):
+    """Dealer requests to join a brand"""
+    existing = await db.dealer_requests.find_one({
+        "dealer_id": request_data.dealer_id,
+        "brand_id": request_data.brand_id,
+        "status": "pending"
+    }, {"_id": 0})
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="Request already pending")
+    
+    request_doc = {
+        "id": generate_id(),
+        **request_data.model_dump(),
+        "status": "pending",
+        "reviewed_by": None,
+        "created_at": now_iso()
+    }
+    await db.dealer_requests.insert_one(request_doc)
+    return request_doc
+
+@api_router.get("/dealer-requests")
+async def list_dealer_requests(brand_id: str = None, status: str = None, user: dict = Depends(get_auth_header())):
+    """List dealer requests (for brand admins and zonal managers)"""
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN, UserRole.ZONAL_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    query = {}
+    if brand_id:
+        query["brand_id"] = brand_id
+    if status:
+        query["status"] = status
+    
+    requests = await db.dealer_requests.find(query, {"_id": 0}).to_list(500)
+    
+    # Enrich with dealer info
+    for req in requests:
+        dealer = await db.dealers.find_one({"id": req["dealer_id"]}, {"_id": 0, "name": 1, "phone": 1, "district": 1, "state": 1})
+        req["dealer"] = dealer
+    
+    return requests
+
+@api_router.put("/dealer-requests/{request_id}/approve")
+async def approve_dealer_request(request_id: str, approve: bool = True, zone_id: str = None, user: dict = Depends(get_auth_header())):
+    """Approve or reject dealer request"""
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN, UserRole.ZONAL_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    request_doc = await db.dealer_requests.find_one({"id": request_id}, {"_id": 0})
+    if not request_doc:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    status = "approved" if approve else "rejected"
+    
+    await db.dealer_requests.update_one(
+        {"id": request_id},
+        {"$set": {"status": status, "reviewed_by": user["id"]}}
+    )
+    
+    if approve:
+        await db.dealers.update_one(
+            {"id": request_doc["dealer_id"]},
+            {"$addToSet": {"brand_links": {"brand_id": request_doc["brand_id"], "status": "approved", "zone_id": zone_id}}}
+        )
+    
+    return {"message": f"Request {status}"}
+
 # ==================== CREATIVE ENDPOINTS ====================
 
 @api_router.post("/creatives", response_model=CreativeResponse)
 async def create_creative(creative: CreativeCreate, user: dict = Depends(get_auth_header())):
-    """Create a new creative campaign"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -785,6 +874,7 @@ async def create_creative(creative: CreativeCreate, user: dict = Depends(get_aut
         "id": generate_id(),
         **creative.model_dump(),
         "status": "active",
+        "featured_until": None,
         "created_at": now_iso()
     }
     await db.creatives.insert_one(creative_doc)
@@ -796,9 +886,10 @@ async def list_creatives(
     brand_id: str = None,
     category: str = None,
     tag: str = None,
+    highlight_tag: str = None,
+    is_featured: bool = None,
     user: dict = Depends(get_auth_header())
 ):
-    """List creatives"""
     query = {"status": "active"}
     
     if brand_id:
@@ -807,27 +898,87 @@ async def list_creatives(
         query["category"] = category
     if tag:
         query["tags"] = tag
+    if highlight_tag:
+        query["highlight_tags"] = highlight_tag
+    if is_featured is not None:
+        query["is_featured"] = is_featured
     
-    # For dealers, filter by targeting
     if user["role"] in [UserRole.DEALER_OWNER, UserRole.DEALER_STAFF]:
         dealer = await db.dealers.find_one({"id": user.get("dealer_id")}, {"_id": 0})
         if dealer:
             approved_brands = [bl["brand_id"] for bl in dealer.get("brand_links", []) if bl["status"] == "approved"]
-            query["brand_id"] = {"$in": approved_brands}
-            # TODO: Add targeting filter for zones/dealers
+            if approved_brands:
+                query["brand_id"] = {"$in": approved_brands}
     
-    creatives = await db.creatives.find(query, {"_id": 0}).to_list(500)
+    creatives = await db.creatives.find(query, {"_id": 0}).sort([("is_featured", -1), ("featured_priority", -1), ("created_at", -1)]).to_list(500)
     
-    # Fetch variants for each creative
     for creative in creatives:
         variants = await db.creative_variants.find({"creative_id": creative["id"]}, {"_id": 0}).to_list(20)
         creative["variants"] = variants
     
     return [CreativeResponse(**c) for c in creatives]
 
+@api_router.get("/creatives/feed")
+async def get_creative_feed(user: dict = Depends(get_auth_header())):
+    """Get structured feed for dealer home"""
+    dealer = await db.dealers.find_one({"id": user.get("dealer_id")}, {"_id": 0})
+    approved_brands = []
+    if dealer:
+        approved_brands = [bl["brand_id"] for bl in dealer.get("brand_links", []) if bl["status"] == "approved"]
+    
+    base_query = {"status": "active"}
+    if approved_brands:
+        base_query["brand_id"] = {"$in": approved_brands}
+    
+    # Featured creatives
+    featured_query = {**base_query, "is_featured": True}
+    featured = await db.creatives.find(featured_query, {"_id": 0}).sort("featured_priority", -1).limit(10).to_list(10)
+    
+    # Seasonal creatives
+    seasonal_query = {**base_query, "highlight_tags": "seasonal"}
+    seasonal = await db.creatives.find(seasonal_query, {"_id": 0}).limit(10).to_list(10)
+    
+    # New creatives
+    new_query = {**base_query, "highlight_tags": "new"}
+    new_creatives = await db.creatives.find(new_query, {"_id": 0}).sort("created_at", -1).limit(10).to_list(10)
+    
+    # Trending
+    trending_query = {**base_query, "highlight_tags": "trending"}
+    trending = await db.creatives.find(trending_query, {"_id": 0}).limit(10).to_list(10)
+    
+    # All creatives
+    all_creatives = await db.creatives.find(base_query, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    
+    # Add variants to all
+    all_ids = set()
+    for section in [featured, seasonal, new_creatives, trending, all_creatives]:
+        for c in section:
+            all_ids.add(c["id"])
+    
+    variants_map = {}
+    for creative_id in all_ids:
+        variants = await db.creative_variants.find({"creative_id": creative_id}, {"_id": 0}).to_list(20)
+        variants_map[creative_id] = variants
+    
+    for section in [featured, seasonal, new_creatives, trending, all_creatives]:
+        for c in section:
+            c["variants"] = variants_map.get(c["id"], [])
+    
+    # Get brands for filter
+    brands = await db.brands.find({"id": {"$in": approved_brands}}, {"_id": 0, "id": 1, "name": 1, "logo": 1}).to_list(50)
+    
+    return {
+        "featured": featured,
+        "seasonal": seasonal,
+        "new": new_creatives,
+        "trending": trending,
+        "all": all_creatives,
+        "brands": brands,
+        "highlight_tags": CREATIVE_TAGS,
+    }
+
 @api_router.get("/creatives/{creative_id}", response_model=CreativeResponse)
 async def get_creative(creative_id: str, user: dict = Depends(get_auth_header())):
-    """Get creative details with variants"""
     creative = await db.creatives.find_one({"id": creative_id}, {"_id": 0})
     if not creative:
         raise HTTPException(status_code=404, detail="Creative not found")
@@ -839,7 +990,6 @@ async def get_creative(creative_id: str, user: dict = Depends(get_auth_header())
 
 @api_router.put("/creatives/{creative_id}")
 async def update_creative(creative_id: str, creative: CreativeCreate, user: dict = Depends(get_auth_header())):
-    """Update creative"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -851,7 +1001,6 @@ async def update_creative(creative_id: str, creative: CreativeCreate, user: dict
 
 @api_router.delete("/creatives/{creative_id}")
 async def delete_creative(creative_id: str, user: dict = Depends(get_auth_header())):
-    """Delete creative (soft delete)"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -870,7 +1019,6 @@ async def create_variant(
     file: UploadFile = File(...),
     user: dict = Depends(get_auth_header())
 ):
-    """Upload a creative variant"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -892,7 +1040,6 @@ async def create_variant(
 
 @api_router.get("/creative-variants/{variant_id}")
 async def get_variant(variant_id: str, user: dict = Depends(get_auth_header())):
-    """Get variant details"""
     variant = await db.creative_variants.find_one({"id": variant_id}, {"_id": 0})
     if not variant:
         raise HTTPException(status_code=404, detail="Variant not found")
@@ -900,7 +1047,6 @@ async def get_variant(variant_id: str, user: dict = Depends(get_auth_header())):
 
 @api_router.delete("/creative-variants/{variant_id}")
 async def delete_variant(variant_id: str, user: dict = Depends(get_auth_header())):
-    """Delete variant"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -911,22 +1057,15 @@ async def delete_variant(variant_id: str, user: dict = Depends(get_auth_header()
 
 @api_router.post("/slip-templates", response_model=SlipTemplateResponse)
 async def create_slip_template(template: SlipTemplateCreate, user: dict = Depends(get_auth_header())):
-    """Create a slip template"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    template_doc = {
-        "id": generate_id(),
-        **template.model_dump(),
-        "is_active": True,
-        "created_at": now_iso()
-    }
+    template_doc = {"id": generate_id(), **template.model_dump(), "is_active": True, "created_at": now_iso()}
     await db.slip_templates.insert_one(template_doc)
     return SlipTemplateResponse(**template_doc)
 
 @api_router.get("/slip-templates", response_model=List[SlipTemplateResponse])
 async def list_slip_templates(brand_id: str = None, user: dict = Depends(get_auth_header())):
-    """List slip templates"""
     query = {"is_active": True}
     if brand_id:
         query["brand_id"] = brand_id
@@ -936,7 +1075,6 @@ async def list_slip_templates(brand_id: str = None, user: dict = Depends(get_aut
 
 @api_router.get("/slip-templates/{template_id}", response_model=SlipTemplateResponse)
 async def get_slip_template(template_id: str, user: dict = Depends(get_auth_header())):
-    """Get slip template details"""
     template = await db.slip_templates.find_one({"id": template_id}, {"_id": 0})
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -944,7 +1082,6 @@ async def get_slip_template(template_id: str, user: dict = Depends(get_auth_head
 
 @api_router.put("/slip-templates/{template_id}")
 async def update_slip_template(template_id: str, template: SlipTemplateCreate, user: dict = Depends(get_auth_header())):
-    """Update slip template"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -954,12 +1091,70 @@ async def update_slip_template(template_id: str, template: SlipTemplateCreate, u
 
 @api_router.delete("/slip-templates/{template_id}")
 async def delete_slip_template(template_id: str, user: dict = Depends(get_auth_header())):
-    """Delete slip template (soft delete)"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     await db.slip_templates.update_one({"id": template_id}, {"$set": {"is_active": False}})
     return {"message": "Template deleted"}
+
+# ==================== SLIP DESIGN ENDPOINTS (Fabric.js) ====================
+
+@api_router.post("/slip-designs")
+async def create_slip_design(design: SlipDesignCreate, user: dict = Depends(get_auth_header())):
+    """Save a Fabric.js slip design"""
+    brand = await db.brands.find_one({"id": design.brand_id}, {"_id": 0})
+    requires_approval = brand.get("settings", {}).get("slip_approval_required", True) if brand else True
+    status = "pending" if requires_approval else "approved"
+    
+    design_doc = {
+        "id": generate_id(),
+        **design.model_dump(),
+        "status": status,
+        "is_default": False,
+        "created_at": now_iso()
+    }
+    await db.slip_designs.insert_one(design_doc)
+    return design_doc
+
+@api_router.get("/slip-designs")
+async def list_slip_designs(dealer_id: str = None, brand_id: str = None, status: str = None, user: dict = Depends(get_auth_header())):
+    query = {}
+    if dealer_id:
+        query["dealer_id"] = dealer_id
+    if brand_id:
+        query["brand_id"] = brand_id
+    if status:
+        query["status"] = status
+    
+    designs = await db.slip_designs.find(query, {"_id": 0}).to_list(100)
+    return designs
+
+@api_router.get("/slip-designs/{design_id}")
+async def get_slip_design(design_id: str, user: dict = Depends(get_auth_header())):
+    design = await db.slip_designs.find_one({"id": design_id}, {"_id": 0})
+    if not design:
+        raise HTTPException(status_code=404, detail="Design not found")
+    return design
+
+@api_router.put("/slip-designs/{design_id}")
+async def update_slip_design(design_id: str, design_json: dict, user: dict = Depends(get_auth_header())):
+    await db.slip_designs.update_one({"id": design_id}, {"$set": {"design_json": design_json}})
+    updated = await db.slip_designs.find_one({"id": design_id}, {"_id": 0})
+    return updated
+
+@api_router.delete("/slip-designs/{design_id}")
+async def delete_slip_design(design_id: str, user: dict = Depends(get_auth_header())):
+    await db.slip_designs.delete_one({"id": design_id})
+    return {"message": "Design deleted"}
+
+@api_router.put("/slip-designs/{design_id}/approve")
+async def approve_slip_design(design_id: str, approve: bool = True, user: dict = Depends(get_auth_header())):
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN, UserRole.ZONAL_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    status = "approved" if approve else "rejected"
+    await db.slip_designs.update_one({"id": design_id}, {"$set": {"status": status}})
+    return {"message": f"Design {status}"}
 
 # ==================== DEALER SLIP ENDPOINTS ====================
 
@@ -971,7 +1166,6 @@ async def create_dealer_slip(
     file: UploadFile = File(...),
     user: dict = Depends(get_auth_header())
 ):
-    """Upload a dealer slip"""
     file_url = await save_file(file, "slips")
     
     brand = await db.brands.find_one({"id": brand_id}, {"_id": 0})
@@ -992,13 +1186,7 @@ async def create_dealer_slip(
     return slip_doc
 
 @api_router.get("/dealer-slips", response_model=List[DealerSlipResponse])
-async def list_dealer_slips(
-    dealer_id: str = None,
-    brand_id: str = None,
-    status: str = None,
-    user: dict = Depends(get_auth_header())
-):
-    """List dealer slips"""
+async def list_dealer_slips(dealer_id: str = None, brand_id: str = None, status: str = None, user: dict = Depends(get_auth_header())):
     query = {}
     if dealer_id:
         query["dealer_id"] = dealer_id
@@ -1012,41 +1200,29 @@ async def list_dealer_slips(
 
 @api_router.put("/dealer-slips/{slip_id}/approve")
 async def approve_dealer_slip(slip_id: str, approve: bool = True, user: dict = Depends(get_auth_header())):
-    """Approve or reject dealer slip"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN, UserRole.ZONAL_MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     status = "approved" if approve else "rejected"
-    await db.dealer_slips.update_one(
-        {"id": slip_id},
-        {"$set": {"status": status, "reviewed_by": user["id"]}}
-    )
+    await db.dealer_slips.update_one({"id": slip_id}, {"$set": {"status": status, "reviewed_by": user["id"]}})
     
     slip = await db.dealer_slips.find_one({"id": slip_id}, {"_id": 0})
     return slip
 
 @api_router.delete("/dealer-slips/{slip_id}")
 async def delete_dealer_slip(slip_id: str, user: dict = Depends(get_auth_header())):
-    """Delete dealer slip"""
     await db.dealer_slips.delete_one({"id": slip_id})
     return {"message": "Slip deleted"}
 
 # ==================== RENDER ENGINE ====================
 
 def generate_qr_code(data: str, size: int = 150) -> Image.Image:
-    """Generate QR code image"""
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=2)
     qr.add_data(data)
     qr.make(fit=True)
     return qr.make_image(fill_color="black", back_color="white").resize((size, size))
 
-def render_slip_on_creative(
-    creative_img: Image.Image,
-    slip_template: dict,
-    dealer: dict,
-    qr_data: str = None
-) -> Image.Image:
-    """Render slip template onto creative image"""
+def render_slip_on_creative(creative_img: Image.Image, slip_template: dict, dealer: dict, qr_data: str = None) -> Image.Image:
     from PIL import ImageDraw, ImageFont
     
     result = creative_img.copy()
@@ -1059,43 +1235,30 @@ def render_slip_on_creative(
     bg_style = slip_template.get("bg_style", "light")
     allowed_fields = slip_template.get("allowed_fields", ["shop_name", "phone"])
     
-    # Calculate slip dimensions
     slip_height = int(height * max_h_pct / 100)
     slip_width = int(width * max_w_pct / 100)
     
-    # Determine slip position
     if position == "bottom":
-        slip_x = (width - slip_width) // 2
-        slip_y = height - slip_height
+        slip_x, slip_y = (width - slip_width) // 2, height - slip_height
     elif position == "top":
-        slip_x = (width - slip_width) // 2
-        slip_y = 0
+        slip_x, slip_y = (width - slip_width) // 2, 0
     elif position == "left":
-        slip_x = 0
-        slip_y = (height - slip_height) // 2
+        slip_x, slip_y = 0, (height - slip_height) // 2
     elif position == "right":
-        slip_x = width - slip_width
-        slip_y = (height - slip_height) // 2
-    else:  # corner (bottom-right)
-        slip_x = width - slip_width
-        slip_y = height - slip_height
+        slip_x, slip_y = width - slip_width, (height - slip_height) // 2
+    else:
+        slip_x, slip_y = width - slip_width, height - slip_height
     
-    # Draw slip background
     if bg_style == "light":
-        bg_color = (255, 255, 255, 230)
-        text_color = (15, 23, 42)
+        bg_color, text_color = (255, 255, 255, 230), (15, 23, 42)
     elif bg_style == "dark":
-        bg_color = (15, 23, 42, 230)
-        text_color = (255, 255, 255)
-    else:  # transparent
-        bg_color = (255, 255, 255, 180)
-        text_color = (15, 23, 42)
+        bg_color, text_color = (15, 23, 42, 230), (255, 255, 255)
+    else:
+        bg_color, text_color = (255, 255, 255, 180), (15, 23, 42)
     
-    # Create slip overlay
     slip_overlay = Image.new('RGBA', (slip_width, slip_height), bg_color)
     slip_draw = ImageDraw.Draw(slip_overlay)
     
-    # Try to use a nice font, fallback to default
     try:
         font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
         font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
@@ -1103,71 +1266,54 @@ def render_slip_on_creative(
         font_large = ImageFont.load_default()
         font_small = ImageFont.load_default()
     
-    # Layout content
     padding = 15
     current_y = padding
     content_x = padding
     
-    # Add QR code if requested
     qr_size = slip_height - 2 * padding
     if qr_data and "qr" in allowed_fields:
         qr_img = generate_qr_code(qr_data, qr_size)
         qr_x = slip_width - qr_size - padding
         slip_overlay.paste(qr_img, (qr_x, padding))
-        max_text_width = qr_x - 2 * padding
-    else:
-        max_text_width = slip_width - 2 * padding
     
-    # Add shop name
     if "shop_name" in allowed_fields and dealer.get("name"):
         slip_draw.text((content_x, current_y), dealer["name"], fill=text_color, font=font_large)
         current_y += 30
     
-    # Add phone
     if "phone" in allowed_fields and dealer.get("phone"):
         slip_draw.text((content_x, current_y), f"📞 {dealer['phone']}", fill=text_color, font=font_small)
         current_y += 22
     
-    # Add WhatsApp
     if "whatsapp" in allowed_fields and dealer.get("whatsapp"):
         slip_draw.text((content_x, current_y), f"💬 {dealer['whatsapp']}", fill=text_color, font=font_small)
         current_y += 22
     
-    # Add address
     if "address" in allowed_fields and dealer.get("address"):
         addr = dealer["address"][:40] + "..." if len(dealer.get("address", "")) > 40 else dealer.get("address", "")
         slip_draw.text((content_x, current_y), f"📍 {addr}", fill=text_color, font=font_small)
     
-    # Paste slip onto result
     result = result.convert('RGBA')
     result.paste(slip_overlay, (slip_x, slip_y), slip_overlay)
     
     return result.convert('RGB')
 
 def overlay_dealer_slip(creative_img: Image.Image, slip_img: Image.Image, position: str = "bottom", max_h_pct: int = 20) -> Image.Image:
-    """Overlay dealer's custom slip onto creative"""
     result = creative_img.copy()
     width, height = result.size
     
-    # Calculate target dimensions
     target_height = int(height * max_h_pct / 100)
     aspect = slip_img.width / slip_img.height
     target_width = min(int(target_height * aspect), width)
     
     slip_resized = slip_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
     
-    # Position slip
     if position == "bottom":
-        x = (width - target_width) // 2
-        y = height - target_height
+        x, y = (width - target_width) // 2, height - target_height
     elif position == "top":
-        x = (width - target_width) // 2
-        y = 0
+        x, y = (width - target_width) // 2, 0
     else:
-        x = width - target_width
-        y = height - target_height
+        x, y = width - target_width, height - target_height
     
-    # Paste with alpha if available
     if slip_resized.mode == 'RGBA':
         result = result.convert('RGBA')
         result.paste(slip_resized, (x, y), slip_resized)
@@ -1179,49 +1325,34 @@ def overlay_dealer_slip(creative_img: Image.Image, slip_img: Image.Image, positi
 
 @api_router.post("/render", response_model=RenderResponse)
 async def render_creative(request: RenderRequest, user: dict = Depends(get_auth_header())):
-    """Render personalized creative with slip"""
-    # Create hash key for caching
-    hash_input = f"{request.creative_variant_id}:{request.slip_mode}:{request.slip_template_id}:{request.dealer_slip_id}:{request.dealer_id}:{request.qr_type}:{request.qr_value}"
+    hash_input = f"{request.creative_variant_id}:{request.slip_mode}:{request.slip_template_id}:{request.dealer_slip_id}:{request.slip_design_id}:{request.dealer_id}:{request.qr_type}:{request.qr_value}"
     hash_key = hashlib.md5(hash_input.encode()).hexdigest()
     
-    # Check cache
     existing = await db.rendered_assets.find_one({"hash_key": hash_key}, {"_id": 0})
     if existing:
-        # Log view event
         await db.events.insert_one({
-            "id": generate_id(),
-            "brand_id": existing["brand_id"],
-            "dealer_id": request.dealer_id,
-            "user_id": user["id"],
-            "type": "render_cached",
-            "meta": {"rendered_asset_id": existing["id"]},
-            "created_at": now_iso()
+            "id": generate_id(), "brand_id": existing["brand_id"], "dealer_id": request.dealer_id,
+            "user_id": user["id"], "type": "render_cached", "meta": {"rendered_asset_id": existing["id"]}, "created_at": now_iso()
         })
         return RenderResponse(**existing)
     
-    # Get variant
     variant = await db.creative_variants.find_one({"id": request.creative_variant_id}, {"_id": 0})
     if not variant:
         raise HTTPException(status_code=404, detail="Creative variant not found")
     
-    # Get dealer
     dealer = await db.dealers.find_one({"id": request.dealer_id}, {"_id": 0})
     if not dealer:
         raise HTTPException(status_code=404, detail="Dealer not found")
     
-    # Load creative image
     file_url = variant["file_url"]
     if file_url.startswith("/api/files/"):
-        # Local file
         file_path = UPLOAD_DIR / file_url.replace("/api/files/", "")
         creative_img = Image.open(file_path)
     else:
-        # Remote URL - download
         import requests
         response = requests.get(file_url)
         creative_img = Image.open(BytesIO(response.content))
     
-    # Prepare QR data
     qr_data = None
     if request.qr_type == "whatsapp":
         phone = request.qr_value or dealer.get("whatsapp") or dealer.get("phone")
@@ -1231,15 +1362,19 @@ async def render_creative(request: RenderRequest, user: dict = Depends(get_auth_
     elif request.qr_type == "custom" and request.qr_value:
         qr_data = request.qr_value
     
-    # Render based on mode
     if request.slip_mode == "template":
         template = await db.slip_templates.find_one({"id": request.slip_template_id}, {"_id": 0})
         if not template:
             raise HTTPException(status_code=404, detail="Slip template not found")
-        
+        result_img = render_slip_on_creative(creative_img, template, dealer, qr_data)
+    elif request.slip_mode == "design":
+        design = await db.slip_designs.find_one({"id": request.slip_design_id}, {"_id": 0})
+        if not design:
+            raise HTTPException(status_code=404, detail="Slip design not found")
+        # For Fabric.js designs, we'd render the JSON - simplified for now
+        template = {"position": "bottom", "max_h_pct": 20, "bg_style": "light", "allowed_fields": ["shop_name", "phone", "qr"]}
         result_img = render_slip_on_creative(creative_img, template, dealer, qr_data)
     else:
-        # Dealer uploaded slip
         dealer_slip = await db.dealer_slips.find_one({"id": request.dealer_slip_id}, {"_id": 0})
         if not dealer_slip:
             raise HTTPException(status_code=404, detail="Dealer slip not found")
@@ -1255,14 +1390,12 @@ async def render_creative(request: RenderRequest, user: dict = Depends(get_auth_
         
         result_img = overlay_dealer_slip(creative_img, slip_img)
     
-    # Save rendered output
     output_buffer = BytesIO()
     result_img.save(output_buffer, format='PNG', quality=95)
     output_buffer.seek(0)
     
     output_url = await save_bytes(output_buffer.getvalue(), "rendered", ".png")
     
-    # Create rendered asset record
     rendered_doc = {
         "id": generate_id(),
         "brand_id": variant["brand_id"],
@@ -1271,21 +1404,16 @@ async def render_creative(request: RenderRequest, user: dict = Depends(get_auth_
         "slip_mode": request.slip_mode,
         "slip_template_id": request.slip_template_id,
         "dealer_slip_id": request.dealer_slip_id,
+        "slip_design_id": request.slip_design_id,
         "output_url": output_url,
         "hash_key": hash_key,
         "created_at": now_iso()
     }
     await db.rendered_assets.insert_one(rendered_doc)
     
-    # Log event
     await db.events.insert_one({
-        "id": generate_id(),
-        "brand_id": variant["brand_id"],
-        "dealer_id": request.dealer_id,
-        "user_id": user["id"],
-        "type": "render_generated",
-        "meta": {"rendered_asset_id": rendered_doc["id"]},
-        "created_at": now_iso()
+        "id": generate_id(), "brand_id": variant["brand_id"], "dealer_id": request.dealer_id,
+        "user_id": user["id"], "type": "render_generated", "meta": {"rendered_asset_id": rendered_doc["id"]}, "created_at": now_iso()
     })
     
     return RenderResponse(**rendered_doc)
@@ -1294,20 +1422,13 @@ async def render_creative(request: RenderRequest, user: dict = Depends(get_auth_
 
 @api_router.get("/download/{asset_id}")
 async def download_asset(asset_id: str, user: dict = Depends(get_auth_header())):
-    """Download rendered asset"""
     asset = await db.rendered_assets.find_one({"id": asset_id}, {"_id": 0})
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     
-    # Log download event
     await db.events.insert_one({
-        "id": generate_id(),
-        "brand_id": asset["brand_id"],
-        "dealer_id": asset["dealer_id"],
-        "user_id": user["id"],
-        "type": "download",
-        "meta": {"rendered_asset_id": asset_id},
-        "created_at": now_iso()
+        "id": generate_id(), "brand_id": asset["brand_id"], "dealer_id": asset["dealer_id"],
+        "user_id": user["id"], "type": "download", "meta": {"rendered_asset_id": asset_id}, "created_at": now_iso()
     })
     
     file_url = asset["output_url"]
@@ -1315,49 +1436,34 @@ async def download_asset(asset_id: str, user: dict = Depends(get_auth_header()))
         file_path = UPLOAD_DIR / file_url.replace("/api/files/", "")
         return FileResponse(file_path, media_type="image/png", filename=f"creative_{asset_id}.png")
     else:
-        # Redirect to S3 URL
         return {"download_url": file_url}
 
 @api_router.post("/share/{asset_id}")
 async def create_share_link(asset_id: str, user: dict = Depends(get_auth_header())):
-    """Create shareable link for asset"""
     asset = await db.rendered_assets.find_one({"id": asset_id}, {"_id": 0})
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     
-    # Create share token
     share_token = secrets.token_urlsafe(16)
     await db.share_links.insert_one({
-        "id": generate_id(),
-        "token": share_token,
-        "asset_id": asset_id,
-        "brand_id": asset["brand_id"],
-        "dealer_id": asset["dealer_id"],
-        "created_at": now_iso(),
-        "clicks": 0
+        "id": generate_id(), "token": share_token, "asset_id": asset_id,
+        "brand_id": asset["brand_id"], "dealer_id": asset["dealer_id"],
+        "created_at": now_iso(), "clicks": 0
     })
     
     return {"share_token": share_token, "share_url": f"/s/{share_token}"}
 
 @api_router.get("/s/{token}")
 async def track_share_click(token: str):
-    """Track share link click and redirect to download"""
     share_link = await db.share_links.find_one({"token": token}, {"_id": 0})
     if not share_link:
         raise HTTPException(status_code=404, detail="Share link not found")
     
-    # Increment click count
     await db.share_links.update_one({"token": token}, {"$inc": {"clicks": 1}})
     
-    # Log event
     await db.events.insert_one({
-        "id": generate_id(),
-        "brand_id": share_link["brand_id"],
-        "dealer_id": share_link["dealer_id"],
-        "user_id": None,
-        "type": "share_clicked",
-        "meta": {"share_token": token},
-        "created_at": now_iso()
+        "id": generate_id(), "brand_id": share_link["brand_id"], "dealer_id": share_link["dealer_id"],
+        "user_id": None, "type": "share_clicked", "meta": {"share_token": token}, "created_at": now_iso()
     })
     
     asset = await db.rendered_assets.find_one({"id": share_link["asset_id"]}, {"_id": 0})
@@ -1366,37 +1472,340 @@ async def track_share_click(token: str):
     
     raise HTTPException(status_code=404, detail="Asset not found")
 
+# ==================== WHATSAPP CAMPAIGN ENDPOINTS ====================
+
+@api_router.post("/campaigns", response_model=CampaignResponse)
+async def create_campaign(campaign: CampaignCreate, user: dict = Depends(get_auth_header())):
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    campaign_doc = {
+        "id": generate_id(),
+        **campaign.model_dump(),
+        "status": "draft",
+        "total_recipients": 0,
+        "sent_count": 0,
+        "delivered_count": 0,
+        "clicked_count": 0,
+        "created_at": now_iso()
+    }
+    await db.campaigns.insert_one(campaign_doc)
+    return CampaignResponse(**campaign_doc)
+
+@api_router.get("/campaigns", response_model=List[CampaignResponse])
+async def list_campaigns(brand_id: str = None, status: str = None, user: dict = Depends(get_auth_header())):
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    query = {}
+    if brand_id:
+        query["brand_id"] = brand_id
+    if status:
+        query["status"] = status
+    
+    campaigns = await db.campaigns.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return [CampaignResponse(**c) for c in campaigns]
+
+@api_router.get("/campaigns/{campaign_id}", response_model=CampaignResponse)
+async def get_campaign(campaign_id: str, user: dict = Depends(get_auth_header())):
+    campaign = await db.campaigns.find_one({"id": campaign_id}, {"_id": 0})
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return CampaignResponse(**campaign)
+
+@api_router.post("/campaigns/{campaign_id}/send")
+async def send_campaign(campaign_id: str, background_tasks: BackgroundTasks, user: dict = Depends(get_auth_header())):
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    campaign = await db.campaigns.find_one({"id": campaign_id}, {"_id": 0})
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    # Get brand WhatsApp config
+    brand = await db.brands.find_one({"id": campaign["brand_id"]}, {"_id": 0})
+    wa_config = brand.get("whatsapp_config", {}) if brand else {}
+    
+    if not wa_config.get("phone_id") or not wa_config.get("access_token"):
+        raise HTTPException(status_code=400, detail="WhatsApp not configured for this brand")
+    
+    # Get recipients
+    if campaign["target_type"] == "dealers":
+        query = {"brand_links.brand_id": campaign["brand_id"], "brand_links.status": "approved"}
+        if campaign["target_zone_ids"]:
+            query["brand_links.zone_id"] = {"$in": campaign["target_zone_ids"]}
+        if campaign["target_dealer_ids"]:
+            query["id"] = {"$in": campaign["target_dealer_ids"]}
+        
+        dealers = await db.dealers.find(query, {"_id": 0}).to_list(10000)
+    else:
+        dealers = []
+    
+    # Update campaign
+    await db.campaigns.update_one(
+        {"id": campaign_id},
+        {"$set": {"status": "sending", "total_recipients": len(dealers)}}
+    )
+    
+    # Queue sending in background
+    background_tasks.add_task(send_campaign_messages, campaign_id, campaign, dealers, wa_config)
+    
+    return {"message": f"Campaign started, sending to {len(dealers)} recipients"}
+
+async def send_campaign_messages(campaign_id: str, campaign: dict, dealers: list, wa_config: dict):
+    """Background task to send WhatsApp messages"""
+    phone_id = wa_config["phone_id"]
+    access_token = wa_config["access_token"]
+    
+    sent_count = 0
+    
+    for dealer in dealers:
+        try:
+            # Generate personalized download link
+            creative = await db.creatives.find_one({"id": campaign["creative_id"]}, {"_id": 0})
+            variants = await db.creative_variants.find({"creative_id": campaign["creative_id"]}, {"_id": 0}).to_list(5)
+            
+            if variants:
+                # Create a share link for this dealer
+                share_token = secrets.token_urlsafe(16)
+                await db.campaign_links.insert_one({
+                    "id": generate_id(),
+                    "campaign_id": campaign_id,
+                    "dealer_id": dealer["id"],
+                    "token": share_token,
+                    "clicked": False,
+                    "created_at": now_iso()
+                })
+                
+                # Format message with variables
+                message = campaign["message_template"]
+                message = message.replace("{dealer_name}", dealer.get("owner_name", ""))
+                message = message.replace("{shop_name}", dealer.get("name", ""))
+                message = message.replace("{phone}", dealer.get("phone", ""))
+                message = message.replace("{creative_link}", f"https://brandslip.app/c/{share_token}")
+                
+                # Send via WhatsApp Cloud API
+                phone = dealer.get("whatsapp") or dealer.get("phone")
+                if phone:
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            f"https://graph.facebook.com/v18.0/{phone_id}/messages",
+                            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                            json={
+                                "messaging_product": "whatsapp",
+                                "to": phone.replace("+", "").replace(" ", ""),
+                                "type": "text",
+                                "text": {"body": message}
+                            }
+                        )
+                        
+                        if response.status_code == 200:
+                            sent_count += 1
+                
+            await asyncio.sleep(0.5)  # Rate limiting
+            
+        except Exception as e:
+            logger.error(f"Failed to send to dealer {dealer['id']}: {e}")
+    
+    # Update campaign status
+    await db.campaigns.update_one(
+        {"id": campaign_id},
+        {"$set": {"status": "completed", "sent_count": sent_count}}
+    )
+
+@api_router.get("/campaigns/{campaign_id}/stats")
+async def get_campaign_stats(campaign_id: str, user: dict = Depends(get_auth_header())):
+    campaign = await db.campaigns.find_one({"id": campaign_id}, {"_id": 0})
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    
+    # Count clicked links
+    clicked = await db.campaign_links.count_documents({"campaign_id": campaign_id, "clicked": True})
+    
+    return {
+        "total_recipients": campaign.get("total_recipients", 0),
+        "sent_count": campaign.get("sent_count", 0),
+        "delivered_count": campaign.get("delivered_count", 0),
+        "clicked_count": clicked,
+        "status": campaign.get("status", "draft")
+    }
+
+@api_router.get("/c/{token}")
+async def track_campaign_link(token: str):
+    """Track campaign link click and redirect to download"""
+    link = await db.campaign_links.find_one({"token": token}, {"_id": 0})
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    
+    await db.campaign_links.update_one({"token": token}, {"$set": {"clicked": True}})
+    
+    # Return creative download page info
+    campaign = await db.campaigns.find_one({"id": link["campaign_id"]}, {"_id": 0})
+    if campaign:
+        creative = await db.creatives.find_one({"id": campaign["creative_id"]}, {"_id": 0})
+        variants = await db.creative_variants.find({"creative_id": campaign["creative_id"]}, {"_id": 0}).to_list(10)
+        
+        return {
+            "dealer_id": link["dealer_id"],
+            "creative": creative,
+            "variants": variants
+        }
+    
+    raise HTTPException(status_code=404, detail="Campaign not found")
+
+# ==================== FEATURED PLACEMENT & PAYMENTS ====================
+
+@api_router.get("/featured-packages")
+async def list_featured_packages():
+    return FEATURED_PACKAGES
+
+@api_router.post("/featured/checkout")
+async def create_featured_checkout(request: FeaturedPaymentRequest, http_request: Request, user: dict = Depends(get_auth_header())):
+    """Create Stripe checkout for featured placement"""
+    if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if request.package_id not in FEATURED_PACKAGES:
+        raise HTTPException(status_code=400, detail="Invalid package")
+    
+    package = FEATURED_PACKAGES[request.package_id]
+    
+    from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionRequest
+    
+    host_url = request.origin_url or str(http_request.base_url)
+    webhook_url = f"{host_url}api/webhook/stripe"
+    
+    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+    
+    success_url = f"{host_url}admin/featured/success?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{host_url}admin/featured"
+    
+    checkout_request = CheckoutSessionRequest(
+        amount=package["price"],
+        currency="usd",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        metadata={
+            "creative_id": request.creative_id,
+            "package_id": request.package_id,
+            "user_id": user["id"],
+            "type": "featured_placement"
+        }
+    )
+    
+    session = await stripe_checkout.create_checkout_session(checkout_request)
+    
+    # Create payment transaction record
+    await db.payment_transactions.insert_one({
+        "id": generate_id(),
+        "session_id": session.session_id,
+        "user_id": user["id"],
+        "creative_id": request.creative_id,
+        "package_id": request.package_id,
+        "amount": package["price"],
+        "currency": "usd",
+        "payment_status": "pending",
+        "created_at": now_iso()
+    })
+    
+    return {"checkout_url": session.url, "session_id": session.session_id}
+
+@api_router.get("/featured/checkout/status/{session_id}")
+async def get_checkout_status(session_id: str, user: dict = Depends(get_auth_header())):
+    """Check payment status and activate featured placement"""
+    from emergentintegrations.payments.stripe.checkout import StripeCheckout
+    
+    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    
+    status = await stripe_checkout.get_checkout_status(session_id)
+    
+    # Update transaction
+    transaction = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    
+    if transaction and status.payment_status == "paid" and transaction["payment_status"] != "paid":
+        # Activate featured placement
+        package = FEATURED_PACKAGES.get(transaction["package_id"], {})
+        duration_days = package.get("duration_days", 7)
+        featured_until = (datetime.now(timezone.utc) + timedelta(days=duration_days)).isoformat()
+        
+        await db.creatives.update_one(
+            {"id": transaction["creative_id"]},
+            {"$set": {
+                "is_featured": True,
+                "featured_priority": 10 if transaction["package_id"] == "spotlight" else 5,
+                "featured_until": featured_until
+            }}
+        )
+        
+        await db.payment_transactions.update_one(
+            {"session_id": session_id},
+            {"$set": {"payment_status": "paid"}}
+        )
+    
+    return {
+        "status": status.status,
+        "payment_status": status.payment_status,
+        "amount_total": status.amount_total,
+        "currency": status.currency
+    }
+
+@api_router.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhooks"""
+    from emergentintegrations.payments.stripe.checkout import StripeCheckout
+    
+    body = await request.body()
+    stripe_signature = request.headers.get("Stripe-Signature")
+    
+    stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url="")
+    
+    try:
+        webhook_response = await stripe_checkout.handle_webhook(body, stripe_signature)
+        
+        if webhook_response.payment_status == "paid":
+            metadata = webhook_response.metadata or {}
+            
+            if metadata.get("type") == "featured_placement":
+                creative_id = metadata.get("creative_id")
+                package_id = metadata.get("package_id")
+                
+                if creative_id and package_id:
+                    package = FEATURED_PACKAGES.get(package_id, {})
+                    duration_days = package.get("duration_days", 7)
+                    featured_until = (datetime.now(timezone.utc) + timedelta(days=duration_days)).isoformat()
+                    
+                    await db.creatives.update_one(
+                        {"id": creative_id},
+                        {"$set": {
+                            "is_featured": True,
+                            "featured_priority": 10 if package_id == "spotlight" else 5,
+                            "featured_until": featured_until
+                        }}
+                    )
+        
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
 # ==================== ANALYTICS ====================
 
 @api_router.get("/analytics/brand/{brand_id}")
 async def get_brand_analytics(brand_id: str, user: dict = Depends(get_auth_header())):
-    """Get brand analytics"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    # Count dealers
     dealer_count = await db.dealers.count_documents({"brand_links.brand_id": brand_id})
     active_dealers = await db.dealers.count_documents({"brand_links.brand_id": brand_id, "brand_links.status": "approved"})
     pending_dealers = await db.dealers.count_documents({"brand_links.brand_id": brand_id, "brand_links.status": "pending"})
     
-    # Count creatives
     creative_count = await db.creatives.count_documents({"brand_id": brand_id, "status": "active"})
     
-    # Count events
     downloads = await db.events.count_documents({"brand_id": brand_id, "type": "download"})
     renders = await db.events.count_documents({"brand_id": brand_id, "type": "render_generated"})
     shares = await db.events.count_documents({"brand_id": brand_id, "type": "share_clicked"})
     
-    # Top performing creatives
-    pipeline = [
-        {"$match": {"brand_id": brand_id, "type": "download"}},
-        {"$lookup": {"from": "rendered_assets", "localField": "meta.rendered_asset_id", "foreignField": "id", "as": "asset"}},
-        {"$unwind": "$asset"},
-        {"$group": {"_id": "$asset.creative_variant_id", "downloads": {"$sum": 1}}},
-        {"$sort": {"downloads": -1}},
-        {"$limit": 5}
-    ]
-    top_creatives = await db.events.aggregate(pipeline).to_list(5)
+    pending_requests = await db.dealer_requests.count_documents({"brand_id": brand_id, "status": "pending"})
     
     return {
         "dealers": {"total": dealer_count, "active": active_dealers, "pending": pending_dealers},
@@ -1404,53 +1813,36 @@ async def get_brand_analytics(brand_id: str, user: dict = Depends(get_auth_heade
         "downloads": downloads,
         "renders": renders,
         "shares": shares,
-        "top_creatives": top_creatives
+        "pending_requests": pending_requests
     }
 
 @api_router.get("/analytics/zone/{zone_id}")
 async def get_zone_analytics(zone_id: str, user: dict = Depends(get_auth_header())):
-    """Get zone analytics"""
     if user["role"] not in [UserRole.PLATFORM_ADMIN, UserRole.BRAND_SUPER_ADMIN, UserRole.ZONAL_MANAGER]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    # Get dealers in zone
     dealers = await db.dealers.find({"brand_links.zone_id": zone_id}, {"_id": 0, "id": 1}).to_list(1000)
     dealer_ids = [d["id"] for d in dealers]
     
     downloads = await db.events.count_documents({"dealer_id": {"$in": dealer_ids}, "type": "download"})
     renders = await db.events.count_documents({"dealer_id": {"$in": dealer_ids}, "type": "render_generated"})
     
-    return {
-        "dealer_count": len(dealer_ids),
-        "downloads": downloads,
-        "renders": renders
-    }
+    return {"dealer_count": len(dealer_ids), "downloads": downloads, "renders": renders}
 
 @api_router.get("/analytics/dealer/{dealer_id}")
 async def get_dealer_analytics(dealer_id: str, user: dict = Depends(get_auth_header())):
-    """Get dealer analytics"""
     downloads = await db.events.count_documents({"dealer_id": dealer_id, "type": "download"})
     renders = await db.events.count_documents({"dealer_id": dealer_id, "type": "render_generated"})
     shares = await db.events.count_documents({"dealer_id": dealer_id, "type": "share_clicked"})
     
-    # Recent activity
-    recent = await db.events.find(
-        {"dealer_id": dealer_id},
-        {"_id": 0}
-    ).sort("created_at", -1).limit(10).to_list(10)
+    recent = await db.events.find({"dealer_id": dealer_id}, {"_id": 0}).sort("created_at", -1).limit(10).to_list(10)
     
-    return {
-        "downloads": downloads,
-        "renders": renders,
-        "shares": shares,
-        "recent_activity": recent
-    }
+    return {"downloads": downloads, "renders": renders, "shares": shares, "recent_activity": recent}
 
 # ==================== FILE SERVING ====================
 
 @api_router.get("/files/{folder}/{filename}")
 async def serve_file(folder: str, filename: str):
-    """Serve uploaded files"""
     file_path = UPLOAD_DIR / folder / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -1467,136 +1859,88 @@ async def serve_file(folder: str, filename: str):
 
 @api_router.post("/seed")
 async def seed_data():
-    """Seed demo data for development"""
-    # Check if already seeded
     existing = await db.brands.find_one({}, {"_id": 0})
     if existing:
         return {"message": "Database already seeded"}
     
     # Create brand
     brand = {
-        "id": generate_id(),
-        "name": "Sunrise Electronics",
+        "id": generate_id(), "name": "Sunrise Electronics",
         "logo": "https://images.unsplash.com/photo-1628760584600-6c31148991e9?w=200",
+        "default_category": "electronics",
         "settings": {"dealer_auto_approve": False, "slip_approval_required": True, "max_upload_size_mb": 10},
+        "whatsapp_config": {},
+        "theme": {},
         "created_at": now_iso()
     }
     await db.brands.insert_one(brand)
     
     # Create admin user
     admin = {
-        "id": generate_id(),
-        "name": "Brand Admin",
-        "phone": "+919876543210",
-        "email": "admin@sunrise.com",
-        "role": UserRole.BRAND_SUPER_ADMIN,
-        "brand_ids": [brand["id"]],
-        "dealer_id": None,
-        "zone_ids": [],
-        "status": "active",
-        "created_at": now_iso()
+        "id": generate_id(), "name": "Brand Admin", "phone": "+919876543210", "email": "admin@sunrise.com",
+        "role": UserRole.BRAND_SUPER_ADMIN, "brand_ids": [brand["id"]], "dealer_id": None, "zone_ids": [],
+        "status": "active", "categories": [], "created_at": now_iso()
     }
     await db.users.insert_one(admin)
     
     # Create zones
     zones = []
     for zone_name, states in [("North Zone", ["Delhi", "Punjab", "Haryana"]), ("South Zone", ["Karnataka", "Tamil Nadu", "Kerala"])]:
-        zone = {
-            "id": generate_id(),
-            "brand_id": brand["id"],
-            "name": zone_name,
-            "states": states,
-            "districts": [],
-            "pincodes": [],
-            "created_at": now_iso()
-        }
+        zone = {"id": generate_id(), "brand_id": brand["id"], "name": zone_name, "states": states, "districts": [], "pincodes": [], "created_at": now_iso()}
         zones.append(zone)
         await db.zones.insert_one(zone)
     
     # Create zonal manager
     manager = {
-        "id": generate_id(),
-        "name": "North Zone Manager",
-        "phone": "+919876543211",
-        "email": "manager@sunrise.com",
-        "role": UserRole.ZONAL_MANAGER,
-        "brand_ids": [brand["id"]],
-        "dealer_id": None,
-        "zone_ids": [zones[0]["id"]],
-        "status": "active",
-        "created_at": now_iso()
+        "id": generate_id(), "name": "North Zone Manager", "phone": "+919876543211", "email": "manager@sunrise.com",
+        "role": UserRole.ZONAL_MANAGER, "brand_ids": [brand["id"]], "dealer_id": None, "zone_ids": [zones[0]["id"]],
+        "status": "active", "categories": [], "created_at": now_iso()
     }
     await db.users.insert_one(manager)
     
     # Create dealers
     dealers_data = [
-        {"name": "Kumar Electronics", "owner_name": "Raj Kumar", "phone": "+919876543212", "address": "Shop 12, Main Market", "pincode": "110001", "district": "Central Delhi", "state": "Delhi"},
-        {"name": "Tech World", "owner_name": "Priya Sharma", "phone": "+919876543213", "address": "34 Mall Road", "pincode": "560001", "district": "Bangalore Urban", "state": "Karnataka"}
+        {"name": "Kumar Electronics", "owner_name": "Raj Kumar", "phone": "+919876543212", "address": "Shop 12, Main Market", "pincode": "110001", "district": "Central Delhi", "state": "Delhi", "categories": ["electronics", "appliances"]},
+        {"name": "Tech World", "owner_name": "Priya Sharma", "phone": "+919876543213", "address": "34 Mall Road", "pincode": "560001", "district": "Bangalore Urban", "state": "Karnataka", "categories": ["electronics"]}
     ]
     
-    dealer_ids = []
     for i, d in enumerate(dealers_data):
         dealer = {
-            "id": generate_id(),
-            **d,
-            "whatsapp": d["phone"],
-            "email": None,
-            "logo_url": None,
+            "id": generate_id(), **d, "whatsapp": d["phone"], "email": None, "logo_url": None,
             "brand_links": [{"brand_id": brand["id"], "status": "approved", "zone_id": zones[i]["id"]}],
+            "default_slips": {},
             "created_at": now_iso()
         }
-        dealer_ids.append(dealer["id"])
         await db.dealers.insert_one(dealer)
         
-        # Create dealer user
         dealer_user = {
-            "id": generate_id(),
-            "name": d["owner_name"],
-            "phone": d["phone"],
-            "email": None,
-            "role": UserRole.DEALER_OWNER,
-            "brand_ids": [brand["id"]],
-            "dealer_id": dealer["id"],
-            "zone_ids": [],
-            "status": "active",
-            "created_at": now_iso()
+            "id": generate_id(), "name": d["owner_name"], "phone": d["phone"], "email": None,
+            "role": UserRole.DEALER_OWNER, "brand_ids": [brand["id"]], "dealer_id": dealer["id"], "zone_ids": [],
+            "status": "active", "categories": d.get("categories", []), "created_at": now_iso()
         }
         await db.users.insert_one(dealer_user)
     
-    # Create creatives
+    # Create creatives with highlight tags
     creatives_data = [
-        {"name": "Diwali Sale 2024", "description": "Festival special discounts", "tags": ["diwali", "sale", "festival"], "category": "seasonal"},
-        {"name": "New Year Offer", "description": "Ring in the new year with savings", "tags": ["newyear", "offer"], "category": "seasonal"}
+        {"name": "Diwali Sale 2024", "description": "Festival special discounts", "tags": ["diwali", "sale", "festival"], "highlight_tags": ["featured", "seasonal"], "category": "seasonal", "is_featured": True, "featured_priority": 10},
+        {"name": "New Year Offer", "description": "Ring in the new year with savings", "tags": ["newyear", "offer"], "highlight_tags": ["new", "offers"], "category": "seasonal", "is_featured": False, "featured_priority": 0}
     ]
     
     for c in creatives_data:
         creative = {
-            "id": generate_id(),
-            "brand_id": brand["id"],
-            **c,
-            "language": "en",
-            "validity_start": now_iso(),
-            "validity_end": None,
+            "id": generate_id(), "brand_id": brand["id"], **c, "language": "en",
+            "validity_start": now_iso(), "validity_end": None,
             "targeting": {"all": True, "zone_ids": [], "dealer_ids": []},
-            "status": "active",
-            "created_at": now_iso()
+            "status": "active", "featured_until": None, "created_at": now_iso()
         }
         await db.creatives.insert_one(creative)
         
-        # Create variants (using sample images)
         variants = [
             {"label": "WhatsApp Status", "width": 1080, "height": 1920, "file_url": "https://images.unsplash.com/photo-1703680325701-c2e7e03824a3?w=1080"},
             {"label": "Instagram Post", "width": 1080, "height": 1080, "file_url": "https://images.unsplash.com/photo-1758061115348-831ae14a801e?w=1080"}
         ]
         for v in variants:
-            variant = {
-                "id": generate_id(),
-                "creative_id": creative["id"],
-                "brand_id": brand["id"],
-                **v,
-                "file_type": "image/jpeg",
-                "created_at": now_iso()
-            }
+            variant = {"id": generate_id(), "creative_id": creative["id"], "brand_id": brand["id"], **v, "file_type": "image/jpeg", "created_at": now_iso()}
             await db.creative_variants.insert_one(variant)
     
     # Create slip templates
@@ -1606,13 +1950,7 @@ async def seed_data():
     ]
     
     for t in templates:
-        template = {
-            "id": generate_id(),
-            "brand_id": brand["id"],
-            **t,
-            "is_active": True,
-            "created_at": now_iso()
-        }
+        template = {"id": generate_id(), "brand_id": brand["id"], **t, "is_active": True, "created_at": now_iso()}
         await db.slip_templates.insert_one(template)
     
     return {"message": "Seed data created", "brand_id": brand["id"], "admin_phone": admin["phone"]}
@@ -1621,7 +1959,7 @@ async def seed_data():
 
 @api_router.get("/")
 async def root():
-    return {"message": "BrandSlip API", "version": "1.0.0"}
+    return {"message": "BrandSlip API V2", "version": "2.0.0"}
 
 @api_router.get("/health")
 async def health():
