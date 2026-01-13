@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 
 class BrandSlipAPITester:
-    def __init__(self, base_url="https://brandslip.preview.emergentagent.com"):
+    def __init__(self, base_url="https://creativeflow-21.preview.emergentagent.com"):
         self.base_url = base_url
         self.admin_token = None
         self.dealer_token = None
